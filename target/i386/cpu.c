@@ -40,6 +40,7 @@
 #include "hw/boards.h"
 #include "hw/i386/sgx-epc.h"
 #endif
+#include "hw/i386/rdt.h"
 
 #include "disas/capstone.h"
 #include "cpu-internal.h"
@@ -653,11 +654,13 @@ void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
           CPUID_7_0_EBX_BMI1 | CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ADX | \
           CPUID_7_0_EBX_PCOMMIT | CPUID_7_0_EBX_CLFLUSHOPT |            \
           CPUID_7_0_EBX_CLWB | CPUID_7_0_EBX_MPX | CPUID_7_0_EBX_FSGSBASE | \
-          CPUID_7_0_EBX_ERMS)
+          CPUID_7_0_EBX_ERMS | \
+          CPUID_7_0_EBX_PQM)
           /* missing:
           CPUID_7_0_EBX_HLE, CPUID_7_0_EBX_AVX2,
           CPUID_7_0_EBX_INVPCID, CPUID_7_0_EBX_RTM,
-          CPUID_7_0_EBX_RDSEED */
+          CPUID_7_0_EBX_RDSEED,
+          CPUID_7_0_EBX_PQE */
 #define TCG_7_0_ECX_FEATURES (CPUID_7_0_ECX_UMIP | CPUID_7_0_ECX_PKU | \
           /* CPUID_7_0_ECX_OSPKE is dynamic */ \
           CPUID_7_0_ECX_LA57 | CPUID_7_0_ECX_PKS)
@@ -672,6 +675,7 @@ void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
 #define TCG_SGX_12_0_EAX_FEATURES 0
 #define TCG_SGX_12_0_EBX_FEATURES 0
 #define TCG_SGX_12_1_EAX_FEATURES 0
+#define TCG_RDT_15_0_EDX_FEATURES CPUID_15_0_EDX_L3
 
 FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
     [FEAT_1_EDX] = {
@@ -816,7 +820,7 @@ FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             "fsgsbase", "tsc-adjust", "sgx", "bmi1",
             "hle", "avx2", NULL, "smep",
             "bmi2", "erms", "invpcid", "rtm",
-            NULL, NULL, "mpx", NULL,
+            "rdt-m", NULL, "mpx", "rdt-a",
             "avx512f", "avx512dq", "rdseed", "adx",
             "smap", "avx512ifma", "pcommit", "clflushopt",
             "clwb", "intel-pt", "avx512pf", "avx512er",
@@ -1286,6 +1290,30 @@ FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             .reg = R_EAX,
         },
         .tcg_features = TCG_SGX_12_1_EAX_FEATURES,
+    },
+
+    [FEAT_RDT_10_0_EBX] = {
+        .type = CPUID_FEATURE_WORD,
+        .feat_names = {
+            NULL, "l3-cat", "l2-cat", "mba"
+        },
+        .cpuid = {
+            .eax = 0x10,
+            .needs_ecx = true, .ecx = 0,
+            .reg = R_EBX,
+        }
+    },
+    [FEAT_RDT_15_0_EDX] = {
+        .type = CPUID_FEATURE_WORD,
+        .feat_names = {
+            [1] = "l3-cmt"
+        },
+        .cpuid = {
+            .eax = 0xf,
+            .needs_ecx = true, .ecx = 0,
+            .reg = R_EDX,
+        },
+        .tcg_features = TCG_RDT_15_0_EDX_FEATURES,
     },
 };
 
@@ -5445,6 +5473,50 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
         assert(!(*eax & ~0x1f));
         *ebx &= 0xffff; /* The count doesn't need to be reliable. */
         break;
+#ifndef CONFIG_USER_ONLY
+    case 0xF:
+        /* Shared Resource Monitoring Enumeration Leaf */
+        *eax = 0;
+        *ebx = 0;
+        *ecx = 0;
+        *edx = 0;
+        if (!(env->features[FEAT_7_0_EBX] & CPUID_7_0_EBX_PQM))
+            break;
+        assert(cpu->rdt);
+        /* Non-zero count is ResId */
+        switch (count) {
+            /* Monitoring Resource Type Enumeration */
+            case 0:
+                *edx = env->features[FEAT_RDT_15_0_EDX];
+                *ebx = rdt_max_rmid(cpu->rdt);
+                break;
+            /* L3 Cache Monitoring Capability Enumeration Data */
+            case 1:
+                /* Upscaling Factor */
+                *ebx = 1;
+                /* MaxRMID */
+                *ecx = rdt_max_rmid(cpu->rdt);
+                /* L3 Total BW = 1 */
+                *edx = CPUID_15_1_EDX_L3_TOTAL_BW;
+                break;
+            default:
+                break;
+        }
+        break;
+    case 0x10:
+        /* Cache Allocation Technology Enumeration leaf */
+        switch (count) {
+            /* Available Resource Type Identification */
+            /* Nothing yet */
+            default:
+                *eax = 0;
+                *ebx = 0;
+                *ecx = 0;
+                *edx = 0;
+                break;
+        }
+        break;
+#endif
     case 0x1C:
         if (accel_uses_host_cpuid() && cpu->enable_pmu &&
             (env->features[FEAT_7_0_EDX] & CPUID_7_0_EDX_ARCH_LBR)) {
@@ -6237,6 +6309,7 @@ void x86_cpu_expand_features(X86CPU *cpu, Error **errp)
         x86_cpu_adjust_feat_level(cpu, FEAT_C000_0001_EDX);
         x86_cpu_adjust_feat_level(cpu, FEAT_SVM);
         x86_cpu_adjust_feat_level(cpu, FEAT_XSAVE);
+        x86_cpu_adjust_feat_level(cpu, FEAT_RDT_15_0_EDX);
 
         /* Intel Processor Trace requires CPUID[0x14] */
         if ((env->features[FEAT_7_0_EBX] & CPUID_7_0_EBX_INTEL_PT)) {

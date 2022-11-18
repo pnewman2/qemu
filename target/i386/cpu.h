@@ -540,6 +540,10 @@ typedef enum X86Seg {
 #define MSR_IA32_VMX_TRUE_ENTRY_CTLS     0x00000490
 #define MSR_IA32_VMX_VMFUNC             0x00000491
 
+#define MSR_IA32_QM_EVTSEL              0x0c8d
+#define MSR_IA32_QM_CTR                 0x0c8e
+#define MSR_IA32_PQR_ASSOC              0x0c8f
+
 #define XSTATE_FP_BIT                   0
 #define XSTATE_SSE_BIT                  1
 #define XSTATE_YMM_BIT                  2
@@ -621,6 +625,9 @@ typedef enum FeatureWord {
     FEAT_SGX_12_1_EAX,  /* CPUID[EAX=0x12,ECX=1].EAX (SGX ATTRIBUTES[31:0]) */
     FEAT_XSAVE_XSS_LO,     /* CPUID[EAX=0xd,ECX=1].ECX */
     FEAT_XSAVE_XSS_HI,     /* CPUID[EAX=0xd,ECX=1].EDX */
+    FEAT_RDT_15_0_EBX,  /* CPUID[EAX=0xf,ECX=0].EBX (RDT CMT/MBM) */
+    FEAT_RDT_15_0_EDX,  /* CPUID[EAX=0xf,ECX=0].EDX (RDT CMT/MBM) */
+    FEAT_RDT_10_0_EBX,  /* CPUID[EAX=0x10,ECX=0].EBX (RDT CAT/MBA) */
     FEATURE_WORDS,
 } FeatureWord;
 
@@ -789,8 +796,12 @@ uint64_t x86_cpu_get_supported_feature_word(FeatureWord w,
 #define CPUID_7_0_EBX_INVPCID           (1U << 10)
 /* Restricted Transactional Memory */
 #define CPUID_7_0_EBX_RTM               (1U << 11)
+/* Resource Director Technology Monitoring */
+#define CPUID_7_0_EBX_PQM               (1U << 12)
 /* Memory Protection Extension */
 #define CPUID_7_0_EBX_MPX               (1U << 14)
+/* Resource Director Technology Allocation */
+#define CPUID_7_0_EBX_PQE               (1U << 15)
 /* AVX-512 Foundation */
 #define CPUID_7_0_EBX_AVX512F           (1U << 16)
 /* AVX-512 Doubleword & Quadword Instruction */
@@ -900,6 +911,11 @@ uint64_t x86_cpu_get_supported_feature_word(FeatureWord w,
 #define CPUID_7_1_EAX_AVX512_BF16       (1U << 5)
 /* XFD Extend Feature Disabled */
 #define CPUID_D_1_EAX_XFD               (1U << 4)
+
+/* RDT L3 Cache Monitoring Technology */
+#define CPUID_15_0_EDX_L3               (1U << 1)
+#define CPUID_15_1_EDX_L3_TOTAL_BW      (1U << 1)
+#define CPUID_15_1_EDX_L3_LOCAL_BW      (1U << 2)
 
 /* Packets which contain IP payload have LIP values */
 #define CPUID_14_0_ECX_LIP              (1U << 31)
@@ -1592,6 +1608,9 @@ typedef struct CPUArchState {
     uint64_t msr_ia32_feature_control;
     uint64_t msr_ia32_sgxlepubkeyhash[4];
 
+    uint64_t msr_ia32_qm_evtsel;
+    uint64_t msr_ia32_pqr_assoc;
+
     uint64_t msr_fixed_ctr_ctrl;
     uint64_t msr_global_ctrl;
     uint64_t msr_global_status;
@@ -1780,6 +1799,8 @@ typedef struct CPUArchState {
 
 struct kvm_msrs;
 
+struct RDTState;
+
 /**
  * X86CPU:
  * @env: #CPUX86State
@@ -1919,6 +1940,9 @@ struct ArchCPU {
     struct DeviceState *apic_state;
     struct MemoryRegion *cpu_as_root, *cpu_as_mem, *smram;
     Notifier machine_done;
+
+    /* Help the RDT MSRs find the RDT device */
+    struct RDTState *rdt;
 
     struct kvm_msrs *kvm_msr_buf;
 
